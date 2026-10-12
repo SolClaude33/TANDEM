@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from 'react'
 import {
   ArrowRight,
   ArrowUpRight,
@@ -14,6 +14,8 @@ import {
 } from '@phosphor-icons/react'
 
 type Route = 'home' | 'explore' | 'dashboard' | 'create'
+type RouteTransitionPhase = 'idle' | 'covering' | 'holding' | 'revealing'
+const ROUTE_TRANSITION_MS = { cover: 420, hold: 640, reveal: 540 } as const
 type WalletKind = 'phantom' | 'solflare' | 'backpack'
 type PublicKeyLike = { toString: () => string }
 type WalletProvider = {
@@ -1413,25 +1415,40 @@ export default function App() {
   const [address, setAddress] = useState('')
   const [refresh, setRefresh] = useState(0)
   const [createKey, setCreateKey] = useState(0)
-  const [routeTransition, setRouteTransition] = useState<{ phase: 'idle' | 'covering' | 'revealing'; label: string }>({ phase: 'idle', label: '' })
+  const [routeTransition, setRouteTransition] = useState<{ phase: RouteTransitionPhase; label: string; run: number }>({ phase: 'idle', label: '', run: 0 })
   const routeRef = useRef(route)
+  const transitionPhaseRef = useRef<RouteTransitionPhase>('idle')
+
+  useLayoutEffect(() => {
+    const main = document.getElementById('main')
+    if (routeTransition.phase === 'idle') main?.removeAttribute('inert')
+    else main?.setAttribute('inert', '')
+  }, [route, routeTransition.phase])
 
   useEffect(() => {
     const motion = window.matchMedia('(prefers-reduced-motion: reduce)')
     let coverTimer = 0
+    let holdTimer = 0
     let revealTimer = 0
     let focusFrame = 0
     let token = 0
+    let run = 0
     let requested = routeRef.current
     let transitioning = false
     const labels: Record<Route, string> = { home: 'Ideas become worlds', explore: 'Explore directions', create: 'Create a project', dashboard: 'Your projects' }
     const clearSchedule = () => {
       if (coverTimer) window.clearTimeout(coverTimer)
+      if (holdTimer) window.clearTimeout(holdTimer)
       if (revealTimer) window.clearTimeout(revealTimer)
       if (focusFrame) window.cancelAnimationFrame(focusFrame)
       coverTimer = 0
+      holdTimer = 0
       revealTimer = 0
       focusFrame = 0
+    }
+    const updateTransition = (phase: RouteTransitionPhase, label: string, nextRun = run) => {
+      transitionPhaseRef.current = phase
+      setRouteTransition({ phase, label, run: nextRun })
     }
     const releaseMain = () => document.getElementById('main')?.removeAttribute('inert')
     const focusMain = () => {
@@ -1443,24 +1460,33 @@ export default function App() {
         main?.focus({ preventScroll: true })
       }
     }
-    const commit = (next: Route, currentToken: number, animate: boolean) => {
+    const finishImmediately = (next: Route, currentToken: number) => {
       if (currentToken !== token) return
       routeRef.current = next
       setRoute(next)
       window.scrollTo({ top: 0, behavior: 'instant' })
+      transitioning = false
+      updateTransition('idle', '')
       focusFrame = window.requestAnimationFrame(focusMain)
-      if (!animate) {
-        transitioning = false
-        setRouteTransition({ phase: 'idle', label: '' })
-        return
-      }
-      setRouteTransition({ phase: 'revealing', label: labels[next] })
+    }
+    const startReveal = (next: Route, currentToken: number) => {
+      if (currentToken !== token) return
+      updateTransition('revealing', labels[next])
       revealTimer = window.setTimeout(() => {
         if (currentToken === token) {
           transitioning = false
-          setRouteTransition({ phase: 'idle', label: '' })
+          updateTransition('idle', '')
+          focusFrame = window.requestAnimationFrame(focusMain)
         }
-      }, 290)
+      }, ROUTE_TRANSITION_MS.reveal)
+    }
+    const commitCovered = (next: Route, currentToken: number) => {
+      if (currentToken !== token) return
+      routeRef.current = next
+      setRoute(next)
+      window.scrollTo({ top: 0, behavior: 'instant' })
+      updateTransition('holding', labels[next])
+      holdTimer = window.setTimeout(() => startReveal(next, currentToken), ROUTE_TRANSITION_MS.hold)
     }
     const begin = (next: Route) => {
       requested = next
@@ -1471,17 +1497,23 @@ export default function App() {
       if (next === routeRef.current) {
         transitioning = false
         releaseMain()
-        setRouteTransition({ phase: 'idle', label: '' })
+        updateTransition('idle', '')
         return
       }
       if (motion.matches) {
-        commit(next, currentToken, false)
+        finishImmediately(next, currentToken)
         return
       }
       transitioning = true
+      run += 1
       document.getElementById('main')?.setAttribute('inert', '')
-      setRouteTransition({ phase: 'covering', label: labels[next] })
-      coverTimer = window.setTimeout(() => commit(next, currentToken, true), 190)
+      if (transitionPhaseRef.current === 'holding') {
+        updateTransition('holding', labels[next], run)
+        commitCovered(next, currentToken)
+        return
+      }
+      updateTransition('covering', labels[next], run)
+      coverTimer = window.setTimeout(() => commitCovered(next, currentToken), ROUTE_TRANSITION_MS.cover)
     }
     const onHash = () => begin(parseRoute())
     const onNew = () => setCreateKey(value => value + 1)
@@ -1490,7 +1522,7 @@ export default function App() {
       token += 1
       const currentToken = token
       clearSchedule()
-      commit(requested, currentToken, false)
+      finishImmediately(requested, currentToken)
     }
     window.addEventListener('hashchange', onHash)
     window.addEventListener('tandem:new-project', onNew)
@@ -1516,10 +1548,25 @@ export default function App() {
       <Header route={route} onWallet={() => setWalletOpen(true)} address={address} />
       {route === 'home' ? <Home refresh={refresh} /> : route === 'explore' ? <main id="main"><Looks expanded /></main> : route === 'create' ? <CreatePage key={createKey} onSaved={() => setRefresh(value => value + 1)} /> : <Dashboard refresh={refresh} />}
       <Footer />
-      <div className="route-curtain" data-phase={routeTransition.phase} aria-hidden="true">
-        <div className="route-curtain-mark"><img src="/assets/tandem-mark.svg" alt="" /><b>tandem</b></div>
-        <span>{routeTransition.label}</span>
-        <i /><i />
+      <div
+        className="route-curtain"
+        data-phase={routeTransition.phase}
+        aria-hidden="true"
+        style={{
+          '--curtain-cover': `${ROUTE_TRANSITION_MS.cover}ms`,
+          '--curtain-hold': `${ROUTE_TRANSITION_MS.hold}ms`,
+          '--curtain-reveal': `${ROUTE_TRANSITION_MS.reveal}ms`,
+          '--curtain-total': `${ROUTE_TRANSITION_MS.cover + ROUTE_TRANSITION_MS.hold + ROUTE_TRANSITION_MS.reveal}ms`,
+        } as CSSProperties}
+      >
+        <div className="route-curtain-scene" key={routeTransition.run}>
+          <div className="route-curtain-mark"><img src="/assets/tandem-mark.svg" alt="" /><b>tandem</b></div>
+          <div className="route-curtain-loops"><i /><i /></div>
+          <strong className="route-curtain-title">
+            {routeTransition.label.split(' ').map((word, index) => <span key={`${word}-${index}`} style={{ '--curtain-word': index } as CSSProperties}>{word}</span>)}
+          </strong>
+          <div className="route-curtain-progress"><i /></div>
+        </div>
       </div>
       <WalletDialog open={walletOpen} onClose={() => setWalletOpen(false)} address={address} setAddress={setAddress} />
     </>
