@@ -754,8 +754,6 @@ function MiniWebsite({ example, compact = false }: { example: Example; compact?:
           </div>
           <div className="mini-site-visual">
             <img src={look.image} alt="" />
-            <span className="mini-site-orbit" />
-            <span className="mini-site-panel"><i /><i /><i /></span>
           </div>
         </div>
         <div className="mini-site-foot"><span>{look.kind} direction</span><b>{String(EXAMPLES.indexOf(example) + 1).padStart(2, '0')}</b></div>
